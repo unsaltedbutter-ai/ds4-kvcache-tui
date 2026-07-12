@@ -1,3 +1,12 @@
 venv/
 __pycache__/
 *.pyc
+
+# Prompt exports (w) contain real prompt text, including whatever private data
+# was in the request. This repo has a GitHub remote, so deny by default and
+# allowlist the tool own files. Adding a new source file means adding it here.
+*
+!.gitignore
+!README.md
+!requirements.txt
+!kvcache_tui.py
