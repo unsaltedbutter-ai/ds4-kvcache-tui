@@ -118,6 +118,13 @@ message and all. It is only read when you select a row, and it stays on this
 machine unless you export it. Point `w` somewhere local, not at a synced or
 shared directory.
 
+Because `w` defaults to writing `<sha>.txt` into the working directory, and
+this repo has a remote, `.gitignore` denies everything by default and
+allowlists only the four files the tool is made of. An exported prompt cannot
+be committed by accident, not even by `git add -A`. The cost is that a genuinely
+new source file will not show up in `git status` until you add an exception for
+it in `.gitignore`.
+
 ## Safety
 
 The tool only ever writes two fields, the hit count at offset 12 and
