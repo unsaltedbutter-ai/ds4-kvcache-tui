@@ -2,8 +2,8 @@
 
 A terminal UI for the [ds4](https://github.com/antirez/ds4) server's disk KV
 cache. It lists the cached checkpoints, shows how often each one has actually
-been reused, lets you read the prompt that produced it, export that prompt to a
-file, artificially raise a file's hit count to protect it from eviction, or
+been reused, lets you read the prompt that produced it, copy or export that
+prompt, artificially raise a file's hit count to protect it from eviction, or
 delete it.
 
 ds4 stores each cached prefix as `<sha1>.kv`, where the name is the hash of the
@@ -41,7 +41,8 @@ the reused ones.
 | `--min-hits` | `1` | Threshold for the `hits>=N` step of the `f` filter cycle. |
 | `--cold-max` | `100000` | Tokens above which a checkpoint is consumed on load. Match your server's `cold_max` (see below). |
 | `--out-dir` | `.` | Default destination for the `w` prompt export. |
-| `--read-only` | off | Disable bump and delete. Browsing, inspecting and exporting still work. |
+| `--copy-cmd` | none | Shell command to also pipe copied text into, e.g. `pbcopy`. See [Copying](#copying). |
+| `--read-only` | off | Disable bump and delete. Browsing, inspecting, copying and exporting still work. |
 
 `--cold-max` should match the running server. Get it from the `KV disk cache`
 banner the server prints at startup:
@@ -58,12 +59,44 @@ grep -m1 "KV disk cache" ~/logs/jumbo-server-stderr.log
 | `s` | Cycle sort: hits, size, tokens, age. |
 | `R` | Reverse the sort order. |
 | `f` | Cycle filter: all, `hits>=N`, `hits>=2`, never hit. |
+| `c` | Copy the selected file's whole prompt to the clipboard. |
 | `w` | Write the selected file's full prompt text out to a file. |
 | `b` | Bump the hit count (a soft "protect", see below). |
 | `d` | Delete the file, with a confirmation. |
 | `r` | Rescan the cache directory. |
 | `tab` | Move focus between the list and the prompt pane (focus the pane to scroll it). |
 | `q` | Quit. |
+
+## Copying
+
+Drag over the prompt pane, or hold shift and move the cursor in it, and the
+highlighted text goes to the clipboard on its own once the selection settles.
+`c` copies the selected file's whole prompt without highlighting anything.
+
+The copy travels as an OSC 52 escape sequence, which means it lands on the
+clipboard of the terminal you are sitting at, not the machine running the
+tool. That is what you want over SSH, but the terminal has to cooperate:
+
+* **iTerm2, WezTerm, Kitty, Ghostty, Alacritty**: works. iTerm2 gates it behind
+  Settings, General, Selection, "Applications in terminal may access clipboard".
+* **tmux**: needs `set -g set-clipboard on` in `.tmux.conf`, otherwise tmux eats
+  the sequence.
+* **macOS Terminal.app**: does not implement OSC 52 at all. Nothing will arrive.
+  Use a different terminal, or `w` to export and copy from the file.
+
+`--copy-cmd` pipes the same text into a shell command *on the machine running
+the tool*, so `--copy-cmd pbcopy` only helps if that is also the machine you are
+sitting at. It runs in addition to the escape sequence, not instead of it.
+
+Copies are capped at 64,000 characters. Past that the escape sequence gets long
+enough that terminals start truncating it silently or dropping it, so the tool
+refuses and tells you to use `w` instead. Roughly a third of a full-length
+prompt fits; anything bigger is an export, not a copy.
+
+Textual holds the mouse while the app runs, so your terminal's own click-drag
+selection does not reach the app. Hold `option` (iTerm2, Terminal.app) or
+`shift` (most Linux terminals) while dragging if you want the terminal's native
+selection instead, for example to grab something out of the table.
 
 ## Reading the columns
 
@@ -115,8 +148,10 @@ and bumping the count will not survive the next load. These are flagged with a
 
 **The prompt text is your real data.** It is the full rendered prompt, system
 message and all. It is only read when you select a row, and it stays on this
-machine unless you export it. Point `w` somewhere local, not at a synced or
-shared directory.
+machine unless you export or copy it. Point `w` somewhere local, not at a synced
+or shared directory. Copying is the one thing that moves it off the box by
+design: highlighting text in the prompt pane puts it on the clipboard of
+whatever machine your terminal is running on, which over SSH is not this one.
 
 Because `w` defaults to writing `<sha>.txt` into the working directory, and
 this repo has a remote, `.gitignore` denies everything by default and

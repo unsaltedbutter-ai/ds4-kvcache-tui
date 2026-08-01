@@ -3,12 +3,16 @@
 
 Run this ON the machine that holds the cache (e.g. notible), in a real
 terminal. It reads each <sha>.kv file's 48-byte header (hit count, tokens,
-size, reason, timestamps) and lets you inspect the stored prompt text, write it
-out to a file, bump a file's hit count (a soft "protect"), or delete it.
+size, reason, timestamps) and lets you inspect the stored prompt text, copy it
+to the clipboard, write it out to a file, bump a file's hit count (a soft
+"protect"), or delete it.
 
 Privacy: the prompt text is only read when you highlight a row, and it never
 leaves this machine - keep the window on the box that owns the data. An export
 (w) writes that prompt to wherever you point it, so keep the destination local.
+Copying is the one exception: selecting text in the detail pane puts it on the
+clipboard of the terminal you are sitting at, which over SSH is a different
+machine than the one holding the cache.
 
 Layout (matches the file format in ds4_kvstore.c):
     offset  0   'K''V''C', version(1), quant, reason, ext_flags, model_id
@@ -23,6 +27,7 @@ from __future__ import annotations
 import argparse
 import os
 import struct
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -54,6 +59,14 @@ PREVIEW_TAIL_BYTES = 160
 PREVIEW_HEAD_CHARS = 48
 PREVIEW_TAIL_CHARS = 48
 INSPECT_LIMIT = 200_000
+# A clipboard copy travels as one OSC 52 escape sequence, and terminals cap how
+# long that may be (tmux drops the whole sequence past its buffer limit, some
+# emulators truncate silently). Refuse past this rather than hand over a prompt
+# that is quietly cut short - (w) exports any size.
+COPY_LIMIT = 64_000
+# TextArea.SelectionChanged fires for every cell a drag crosses; wait for the
+# gesture to settle so one selection means one copy, not a hundred.
+COPY_DEBOUNCE = 0.25
 
 REASONS = {0: "unknown", 1: "cold", 2: "continued", 3: "evict",
            4: "shutdown", 5: "agent-system", 6: "agent-session"}
@@ -276,6 +289,7 @@ class KVCacheApp(App):
         Binding("s", "sort", "Sort"),
         Binding("R", "reverse", "Reverse"),
         Binding("f", "filter", "Filter"),
+        Binding("c", "copy_prompt", "Copy prompt"),
         Binding("w", "export", "Write prompt"),
         Binding("b", "bump", "Bump hits"),
         Binding("d", "delete", "Delete"),
@@ -285,15 +299,17 @@ class KVCacheApp(App):
     ]
 
     def __init__(self, cache_dir: str, min_hits: int, read_only: bool,
-                 out_dir: str) -> None:
+                 out_dir: str, copy_cmd: str = "") -> None:
         super().__init__()
         self.cache_dir = cache_dir
         self.min_hits = min_hits
         self.read_only = read_only
         self.out_dir = out_dir
+        self.copy_cmd = copy_cmd
         self.entries: list[Entry] = []
         self.shown: list[Entry] = []
         self.by_sha: dict[str, Entry] = {}
+        self._copy_timer = None
         # "all" leads so a fresh window shows the whole cache: the never-reused
         # files are most of it, and hiding them by default understates what is
         # on disk. (f) cycles down to the narrower views.
@@ -422,6 +438,52 @@ class KVCacheApp(App):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         self.show_detail()
 
+    # ---- clipboard -----------------------------------------------------
+
+    def send_to_clipboard(self, text: str, what: str) -> None:
+        """Put text on the clipboard of whatever terminal is displaying us.
+
+        Textual writes an OSC 52 sequence, which the terminal emulator picks
+        up - so over SSH this lands on the clipboard of the machine you are
+        sitting at, not this one. macOS Terminal.app ignores OSC 52 entirely;
+        --copy-cmd is the way out there (it pipes to a command on THIS host).
+        """
+        if not text:
+            return
+        if len(text) > COPY_LIMIT:
+            self.notify(f"{what} is {len(text)} chars - past the {COPY_LIMIT} "
+                        "clipboard limit. Use (w) to export it to a file.",
+                        severity="warning", timeout=6)
+            return
+        self.copy_to_clipboard(text)
+        if self.copy_cmd:
+            try:
+                subprocess.run(self.copy_cmd, shell=True, check=True,
+                               input=text.encode("utf-8"))
+            except (OSError, subprocess.SubprocessError) as ex:
+                self.notify(f"--copy-cmd failed: {ex}", severity="error")
+                return
+        self.notify(f"Copied {what} ({len(text)} chars)", timeout=3)
+
+    def on_text_area_selection_changed(
+            self, event: TextArea.SelectionChanged) -> None:
+        """Copy a highlighted range as soon as the selection settles.
+
+        Textual holds the mouse, so the terminal's own drag-to-select never
+        sees this pane and there is otherwise no way to get text out of it.
+        """
+        if self._copy_timer is not None:
+            self._copy_timer.stop()
+            self._copy_timer = None
+        if not event.text_area.selected_text:
+            return
+        self._copy_timer = self.set_timer(COPY_DEBOUNCE, self.copy_selection)
+
+    def copy_selection(self) -> None:
+        self._copy_timer = None
+        self.send_to_clipboard(
+            self.query_one("#detail", TextArea).selected_text, "selection")
+
     # ---- actions -------------------------------------------------------
 
     def action_sort(self) -> None:
@@ -443,6 +505,13 @@ class KVCacheApp(App):
         self.scan()
         self.populate(keep_sha=keep)
         self.notify("Rescanned cache directory")
+
+    def action_copy_prompt(self) -> None:
+        """Copy the whole prompt of the selected entry, no highlighting needed."""
+        e = self.current_entry()
+        if not e:
+            return
+        self.send_to_clipboard(read_prompt_text(e), f"prompt of {e.sha[:12]}")
 
     def action_export(self) -> None:
         """Write the selected entry's full prompt text to a file.
@@ -568,6 +637,12 @@ def main() -> None:
     ap.add_argument("--out-dir", default=".",
                     help="default destination for the (w) prompt export; the "
                          "path is editable at export time (default: %(default)s)")
+    ap.add_argument("--copy-cmd", default="",
+                    help="shell command to also pipe copied text into, e.g. "
+                         "'pbcopy'. Copying normally goes through an OSC 52 "
+                         "escape, which macOS Terminal.app ignores; this runs "
+                         "on the machine the TUI runs on, so it is only useful "
+                         "when that is also where you are sitting")
     ap.add_argument("--read-only", action="store_true",
                     help="disable bump/delete (browse, inspect and export only)")
     args = ap.parse_args()
@@ -575,7 +650,7 @@ def main() -> None:
         raise SystemExit(f"No such directory: {args.dir}")
     COLD_MAX_TOKENS = args.cold_max
     KVCacheApp(args.dir, args.min_hits, args.read_only,
-               os.path.expanduser(args.out_dir)).run()
+               os.path.expanduser(args.out_dir), args.copy_cmd).run()
 
 
 if __name__ == "__main__":
