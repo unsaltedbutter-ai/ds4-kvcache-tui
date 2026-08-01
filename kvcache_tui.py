@@ -5,7 +5,8 @@ Run this ON the machine that holds the cache (e.g. notible), in a real
 terminal. It reads each <sha>.kv file's 48-byte header (hit count, tokens,
 size, reason, timestamps) and lets you inspect the stored prompt text, copy it
 to the clipboard, write it out to a file, bump a file's hit count (a soft
-"protect"), or delete it.
+"protect"), delete it, or sweep out whole batches of dead conversation
+checkpoints at once.
 
 Privacy: the prompt text is only read when you highlight a row, and it never
 leaves this machine - keep the window on the box that owns the data. An export
@@ -293,23 +294,31 @@ class KVCacheApp(App):
         Binding("w", "export", "Write prompt"),
         Binding("b", "bump", "Bump hits"),
         Binding("d", "delete", "Delete"),
+        Binding("x", "sweep", "Sweep old"),
         Binding("r", "refresh", "Rescan"),
         Binding("tab", "focus_next", "Focus pane"),
         Binding("q", "quit", "Quit"),
     ]
 
     def __init__(self, cache_dir: str, min_hits: int, read_only: bool,
-                 out_dir: str, copy_cmd: str = "") -> None:
+                 out_dir: str, copy_cmd: str = "",
+                 sweep_reasons: tuple = ("evict",),
+                 sweep_hours: float = 24) -> None:
         super().__init__()
         self.cache_dir = cache_dir
         self.min_hits = min_hits
         self.read_only = read_only
         self.out_dir = out_dir
         self.copy_cmd = copy_cmd
+        self.sweep_reasons = sweep_reasons
+        self.sweep_hours = sweep_hours
         self.entries: list[Entry] = []
         self.shown: list[Entry] = []
         self.by_sha: dict[str, Entry] = {}
         self._copy_timer = None
+        # Set while a sweep is being previewed: a filter that is not part of
+        # the (f) cycle, so the table shows exactly the files about to go.
+        self.view_override: tuple = ()
         # "all" leads so a fresh window shows the whole cache: the never-reused
         # files are most of it, and hiding them by default understates what is
         # on disk. (f) cycles down to the narrower views.
@@ -377,7 +386,7 @@ class KVCacheApp(App):
         that slot is selected and you can keep working down the list.
         """
         now = int(time.time())
-        _, pred = self.filters[self.filter_idx]
+        filter_label, pred = self.view_override or self.filters[self.filter_idx]
         sort_label, keyfn = self.sorts[self.sort_idx]
         rows = [e for e in self.entries if pred(e)]
         rows.sort(key=keyfn, reverse=self.reverse)
@@ -405,7 +414,7 @@ class KVCacheApp(App):
         self.query_one("#status", Static).update(
             f"{len(rows)} shown / {len(self.entries)} total   "
             f"shown {human_size(shown_bytes)} / all {human_size(all_bytes)}   "
-            f"sort={sort_label}{arrow}  filter={self.filters[self.filter_idx][0]}   "
+            f"sort={sort_label}{arrow}  filter={filter_label}   "
             f"[{mode}]   * = >{COLD_MAX_TOKENS // 1000}k tok (consumed-on-load)"
         )
 
@@ -644,6 +653,107 @@ class KVCacheApp(App):
         )
 
 
+    def end_sweep_preview(self) -> None:
+        self.view_override = ()
+        self.populate()
+
+    def action_sweep(self) -> None:
+        """Delete dead conversation checkpoints in bulk.
+
+        A file qualifies on three counts together: it was written for one of
+        --sweep-reasons (by default 'evict', the mid-conversation flushes left
+        behind when another conversation took the GPU cache), the server has
+        never reused it, and it has sat untouched long enough that nothing is
+        coming back for it. The age test is what makes the other two safe:
+        a checkpoint from a conversation still in flight was written recently.
+
+        The matching files are shown in the table before you confirm, so the
+        list you are agreeing to delete is the list in front of you.
+        """
+        if self.read_only:
+            self.notify("Read-only mode: sweep disabled", severity="warning")
+            return
+        reasons = ", ".join(self.sweep_reasons)
+
+        def after_hours(value: str | None) -> None:
+            if value is None:
+                return
+            try:
+                hours = float(value)
+                if hours < 0:
+                    raise ValueError
+            except ValueError:
+                self.notify("Enter a non-negative number of hours",
+                            severity="error")
+                return
+
+            cutoff = int(time.time()) - int(hours * 3600)
+            self.view_override = (
+                f"sweep {reasons} unused >{value}h",
+                lambda e: (REASONS.get(e.reason, "?") in self.sweep_reasons
+                           and e.hits == 0 and e.last_used <= cutoff),
+            )
+            self.populate()
+            doomed = list(self.shown)
+            if not doomed:
+                self.end_sweep_preview()
+                self.notify(f"Nothing to sweep: no unused {reasons} files "
+                            f"older than {value}h", timeout=6)
+                return
+
+            now = int(time.time())
+            freed = sum(e.size for e in doomed)
+            newest = human_age(now - max(e.last_used for e in doomed))
+            oldest = human_age(now - min(e.last_used for e in doomed))
+            # These read hits=0 whether or not they were ever reused, so the
+            # "never reused" half of the test means nothing for them.
+            cold = sum(1 for e in doomed if e.consumed_on_load)
+            note = (f"\n{cold} are >{COLD_MAX_TOKENS // 1000}k tokens, whose "
+                    "hit count always reads 0 - look at those first."
+                    if cold else "")
+
+            def do_sweep(confirmed: bool | None) -> None:
+                if not confirmed:
+                    self.end_sweep_preview()
+                    self.notify("Sweep cancelled")
+                    return
+                gone: set = set()
+                freed_now = 0
+                failed = 0
+                for e in doomed:
+                    try:
+                        os.unlink(e.path)
+                    except OSError:
+                        failed += 1
+                        continue
+                    gone.add(e.sha)
+                    freed_now += e.size
+                self.entries = [x for x in self.entries if x.sha not in gone]
+                for sha in gone:
+                    self.by_sha.pop(sha, None)
+                self.end_sweep_preview()
+                msg = f"Swept {len(gone)} files, freed {human_size(freed_now)}"
+                if failed:
+                    self.notify(f"{msg}. {failed} could not be deleted.",
+                                severity="warning", timeout=8)
+                else:
+                    self.notify(msg, timeout=6)
+
+            self.push_screen(
+                ConfirmScreen(f"Delete the {len(doomed)} files now listed?\n"
+                              f"Frees {human_size(freed)}. Last used between "
+                              f"{newest} and {oldest} ago.{note}"),
+                do_sweep,
+            )
+
+        self.push_screen(
+            InputScreen(f"Sweep {reasons} files that were never reused and have "
+                        "not been touched for N hours.\nN =",
+                        str(self.sweep_hours)),
+            after_hours,
+        )
+
+
 def main() -> None:
     global COLD_MAX_TOKENS
     ap = argparse.ArgumentParser(description="Browse/manage the ds4 disk KV cache.")
@@ -666,14 +776,30 @@ def main() -> None:
                          "escape, which macOS Terminal.app ignores; this runs "
                          "on the machine the TUI runs on, so it is only useful "
                          "when that is also where you are sitting")
+    ap.add_argument("--sweep-reasons", default="evict",
+                    help="comma-separated write reasons the (x) sweep is "
+                         "allowed to delete. 'cold' is deliberately not the "
+                         "default: those are the session entry prefixes that "
+                         "get reused across conversations (default: %(default)s)")
+    ap.add_argument("--sweep-hours", type=float, default=24,
+                    help="age the (x) sweep proposes, editable each time you "
+                         "run it (default: %(default)s)")
     ap.add_argument("--read-only", action="store_true",
-                    help="disable bump/delete (browse, inspect and export only)")
+                    help="disable bump/delete/sweep (browse, inspect, copy and "
+                         "export only)")
     args = ap.parse_args()
     if not os.path.isdir(args.dir):
         raise SystemExit(f"No such directory: {args.dir}")
+    sweep_reasons = tuple(r.strip() for r in args.sweep_reasons.split(",")
+                          if r.strip())
+    unknown = [r for r in sweep_reasons if r not in REASONS.values()]
+    if unknown or not sweep_reasons:
+        raise SystemExit(f"--sweep-reasons: unknown {', '.join(unknown) or '(empty)'}"
+                         f"; pick from {', '.join(sorted(REASONS.values()))}")
     COLD_MAX_TOKENS = args.cold_max
     KVCacheApp(args.dir, args.min_hits, args.read_only,
-               os.path.expanduser(args.out_dir), args.copy_cmd).run()
+               os.path.expanduser(args.out_dir), args.copy_cmd,
+               sweep_reasons, args.sweep_hours).run()
 
 
 if __name__ == "__main__":

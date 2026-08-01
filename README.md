@@ -42,7 +42,9 @@ the reused ones.
 | `--cold-max` | `100000` | Tokens above which a checkpoint is consumed on load. Match your server's `cold_max` (see below). |
 | `--out-dir` | `.` | Default destination for the `w` prompt export. |
 | `--copy-cmd` | none | Shell command to also pipe copied text into, e.g. `pbcopy`. See [Copying](#copying). |
-| `--read-only` | off | Disable bump and delete. Browsing, inspecting, copying and exporting still work. |
+| `--sweep-reasons` | `evict` | Comma-separated write reasons the `x` sweep may delete. See [Sweeping](#sweeping). |
+| `--sweep-hours` | `24` | Age the `x` sweep proposes. Editable every time you run it. |
+| `--read-only` | off | Disable bump, delete and sweep. Browsing, inspecting, copying and exporting still work. |
 
 `--cold-max` should match the running server. Get it from the `KV disk cache`
 banner the server prints at startup:
@@ -63,6 +65,7 @@ grep -m1 "KV disk cache" ~/logs/jumbo-server-stderr.log
 | `w` | Write the selected file's full prompt text out to a file. |
 | `b` | Bump the hit count (a soft "protect", see below). |
 | `d` | Delete the file, with a confirmation. The cursor stays on the same row, so the next file lands under it and you can keep deleting without scrolling back. |
+| `x` | Sweep: bulk-delete dead conversation checkpoints by age. See [Sweeping](#sweeping). |
 | `r` | Rescan the cache directory. |
 | `tab` | Move focus between the list and the prompt pane (focus the pane to scroll it). |
 | `q` | Quit. |
@@ -115,6 +118,41 @@ selection instead, for example to grab something out of the table.
   `thinking-visible` when the server is keying on rendered output.
 * **age** is time since `last_used`. This is the number the eviction score
   decays against, so it is the one that decides what dies first.
+
+## Sweeping
+
+Deleting one file at a time does not scale to clearing out finished
+conversations. `x` asks for an age in hours and deletes every file that meets
+three conditions at once:
+
+* it was written for one of `--sweep-reasons`, `evict` by default;
+* the server has never reused it (`hits` is 0);
+* it has not been touched for at least that many hours.
+
+The three together are what make it safe. On its own, "evicted and never
+reused" also describes a conversation that is alive right now and whose
+checkpoint was written thirty seconds ago; the age test is what excludes it.
+Before the confirmation appears the table is filtered down to exactly the
+matching files, so the list you are approving is the list on screen. Answering
+no restores the previous view and deletes nothing.
+
+`cold` is deliberately not in the default reasons. Those are the session entry
+prefixes, the ones that get reused across independent conversations, which is
+the entire point of the cache. `evict` files are mid-conversation flushes left
+behind when another conversation took the GPU cache, and once that conversation
+is over nothing will ask for them again. Widen to
+`--sweep-reasons evict,continued,shutdown` if you also want mid-conversation
+waypoints and whatever the last shutdown left behind.
+
+One caveat the confirmation will remind you of: files larger than `cold_max`
+are consumed on load, so their hit count reads 0 no matter how often they were
+used, and the "never reused" condition tells you nothing about them. The age
+condition still protects the ones in active use, since a file that was loaded
+recently was also rewritten recently.
+
+For a sense of scale, on a real cache dominated by agent traffic nearly every
+file is an `evict` that was never read back, so a 24-hour sweep can reclaim
+most of the directory. Look at the `reason` column before picking an age.
 
 ## Protecting a file (`b`)
 
