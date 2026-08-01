@@ -29,16 +29,16 @@ python3 -m venv venv
 
 It needs a real terminal (it will not work through a pipe). Over SSH is fine.
 
-By default it opens showing only files with at least one cache hit, which is
-usually what you care about: in a real cache most files are written once and
-never read again.
+It opens on the whole cache. In practice most files are written once and never
+read again, so that first screen is mostly never-hit entries; `f` narrows to
+the reused ones.
 
 ### Options
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--dir` | `/Volumes/4TB-1/ds4-kv-cache` | Cache directory to browse. |
-| `--min-hits` | `1` | Initial filter: hide files with fewer hits than this. `0` shows everything. |
+| `--min-hits` | `1` | Threshold for the `hits>=N` step of the `f` filter cycle. |
 | `--cold-max` | `100000` | Tokens above which a checkpoint is consumed on load. Match your server's `cold_max` (see below). |
 | `--out-dir` | `.` | Default destination for the `w` prompt export. |
 | `--read-only` | off | Disable bump and delete. Browsing, inspecting and exporting still work. |
@@ -57,7 +57,7 @@ grep -m1 "KV disk cache" ~/logs/jumbo-server-stderr.log
 | `up` / `down` | Move the selection. The prompt of the selected file loads in the bottom pane. |
 | `s` | Cycle sort: hits, size, tokens, age. |
 | `R` | Reverse the sort order. |
-| `f` | Cycle filter: `hits>=N`, `hits>=2`, never hit, all. |
+| `f` | Cycle filter: all, `hits>=N`, `hits>=2`, never hit. |
 | `w` | Write the selected file's full prompt text out to a file. |
 | `b` | Bump the hit count (a soft "protect", see below). |
 | `d` | Delete the file, with a confirmation. |

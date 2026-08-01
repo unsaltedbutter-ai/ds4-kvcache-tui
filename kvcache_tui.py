@@ -294,11 +294,14 @@ class KVCacheApp(App):
         self.entries: list[Entry] = []
         self.shown: list[Entry] = []
         self.by_sha: dict[str, Entry] = {}
+        # "all" leads so a fresh window shows the whole cache: the never-reused
+        # files are most of it, and hiding them by default understates what is
+        # on disk. (f) cycles down to the narrower views.
         self.filters = [
+            ("all", lambda e: True),
             (f"hits>={min_hits}", lambda e: e.hits >= min_hits),
             ("hits>=2", lambda e: e.hits >= 2),
             ("never hit", lambda e: e.hits == 0),
-            ("all", lambda e: True),
         ]
         self.filter_idx = 0
         self.sorts = [
@@ -555,8 +558,9 @@ def main() -> None:
     ap.add_argument("--dir", default="/Volumes/4TB-1/ds4-kv-cache",
                     help="cache directory (default: %(default)s)")
     ap.add_argument("--min-hits", type=int, default=1,
-                    help="initial filter: show files with at least this many hits "
-                         "(default: 1 = reused at least once)")
+                    help="threshold for the hits>=N step of the (f) filter cycle; "
+                         "the window opens on 'all' (default: 1 = reused at "
+                         "least once)")
     ap.add_argument("--cold-max", type=int, default=COLD_MAX_TOKENS,
                     help="tokens above which a checkpoint is consumed-on-load; match "
                          "your server's cold_max from the 'KV disk cache' startup "
