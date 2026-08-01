@@ -62,7 +62,7 @@ grep -m1 "KV disk cache" ~/logs/jumbo-server-stderr.log
 | `c` | Copy the selected file's whole prompt to the clipboard. |
 | `w` | Write the selected file's full prompt text out to a file. |
 | `b` | Bump the hit count (a soft "protect", see below). |
-| `d` | Delete the file, with a confirmation. |
+| `d` | Delete the file, with a confirmation. The cursor stays on the same row, so the next file lands under it and you can keep deleting without scrolling back. |
 | `r` | Rescan the cache directory. |
 | `tab` | Move focus between the list and the prompt pane (focus the pane to scroll it). |
 | `q` | Quit. |

@@ -366,7 +366,16 @@ class KVCacheApp(App):
         self.entries = entries
         self.by_sha = {e.sha: e for e in entries}
 
-    def populate(self, keep_sha: str | None = None) -> None:
+    def populate(self, keep_sha: str | None = None,
+                 keep_row: int | None = None) -> None:
+        """Redraw the table, restoring the cursor.
+
+        keep_sha follows a specific file wherever it moved to. keep_row is the
+        fallback for when that file is no longer in the list at all - deleted,
+        or filtered out by the edit that triggered the redraw - and holds the
+        cursor at the position it was at instead, so the row that slid up into
+        that slot is selected and you can keep working down the list.
+        """
         now = int(time.time())
         _, pred = self.filters[self.filter_idx]
         sort_label, keyfn = self.sorts[self.sort_idx]
@@ -400,12 +409,17 @@ class KVCacheApp(App):
             f"[{mode}]   * = >{COLD_MAX_TOKENS // 1000}k tok (consumed-on-load)"
         )
 
+        row = None
         if keep_sha:
-            for i, e in enumerate(rows):
-                if e.sha == keep_sha:
-                    table.move_cursor(row=i)
-                    break
+            row = next((i for i, e in enumerate(rows) if e.sha == keep_sha), None)
+        if row is None and keep_row is not None and rows:
+            row = min(keep_row, len(rows) - 1)
+        if row is not None:
+            table.move_cursor(row=row)
         self.show_detail()
+
+    def current_row(self) -> int:
+        return self.query_one(DataTable).cursor_row or 0
 
     def current_entry(self) -> Entry | None:
         if not self.shown:
@@ -502,8 +516,9 @@ class KVCacheApp(App):
 
     def action_refresh(self) -> None:
         keep = e.sha if (e := self.current_entry()) else None
+        row = self.current_row()
         self.scan()
-        self.populate(keep_sha=keep)
+        self.populate(keep_sha=keep, keep_row=row)
         self.notify("Rescanned cache directory")
 
     def action_copy_prompt(self) -> None:
@@ -557,6 +572,7 @@ class KVCacheApp(App):
         e = self.current_entry()
         if not e:
             return
+        row = self.current_row()
         if self.read_only:
             self.notify("Read-only mode: bump disabled", severity="warning")
             return
@@ -584,7 +600,9 @@ class KVCacheApp(App):
             e.hits = new_hits
             e.last_used = now
             self.notify(f"Set hits={new_hits}, refreshed last_used")
-            self.populate(keep_sha=e.sha)
+            # A bump can push the file out of the active filter (the obvious
+            # case: browsing "never hit"), so keep the row as the fallback.
+            self.populate(keep_sha=e.sha, keep_row=row)
 
         self.push_screen(
             InputScreen(f"Protect {e.sha[:12]}...  set hit count (was {e.hits}):",
@@ -599,6 +617,7 @@ class KVCacheApp(App):
         if self.read_only:
             self.notify("Read-only mode: delete disabled", severity="warning")
             return
+        row = self.current_row()
 
         def after(confirmed: bool | None) -> None:
             if not confirmed:
@@ -611,7 +630,11 @@ class KVCacheApp(App):
             self.entries = [x for x in self.entries if x.sha != e.sha]
             self.by_sha.pop(e.sha, None)
             self.notify(f"Deleted {e.sha[:12]}... ({human_size(e.size)} freed)")
-            self.populate()
+            # Hold the cursor where it was: the next file slides into this row,
+            # so repeated deletes keep working through the list from the same
+            # place instead of throwing you back to the top every time. At the
+            # end of the list the row clamps to the new last entry.
+            self.populate(keep_row=row)
 
         self.push_screen(
             ConfirmScreen(f"Delete {e.sha[:12]}...\n"
